@@ -1,0 +1,9 @@
+{
+  "name": "MARK - Human-like AI",
+  "description": "An intelligent, emotional, voice-first AI assistant created by Ankit Raj, focused on Indian languages and real-time interaction.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}

@@ -6,11 +6,6 @@ import Visualizer from './components/Visualizer';
 import { ConnectionState } from './types';
 import { MODEL_NAME, SYSTEM_INSTRUCTION } from './constants';
 
-// --- CONFIGURATION ---
-// Replace this string with your actual API key if you want to hardcode it for deployment.
-// Otherwise, it will try to read from environment variables.
-const HARDCODED_API_KEY = "AIzaSyDCyfp1NKy2GEllfB8Sg5ofmWK9wrmzNEM"; 
-
 const App: React.FC = () => {
   // State
   const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.DISCONNECTED);
@@ -20,7 +15,7 @@ const App: React.FC = () => {
   const [modelSpeaking, setModelSpeaking] = useState(false);
   const [userSpeaking, setUserSpeaking] = useState(false);
   
-  // Refs for Audio/Video Contexts and Session
+  // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -29,26 +24,21 @@ const App: React.FC = () => {
   const nextStartTimeRef = useRef<number>(0);
   const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const frameIntervalRef = useRef<number | null>(null);
-  const transcriptionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const transcriptionTimeoutRef = useRef<any>(null);
 
-  // Initialize AI Client with robust fallback
+  // Initialize AI Client
   const getAIClient = () => {
-    let key = HARDCODED_API_KEY;
-    
-    // Check if process.env exists (Build step environment)
-    try {
-        if (process.env.API_KEY && process.env.API_KEY.startsWith("AIza")) {
-            key = process.env.API_KEY;
-        }
-    } catch(e) {
-        // process is not defined in raw browser env
+    // process.env.API_KEY is replaced by Vite during build with the string from Netlify
+    const apiKey = process.env.API_KEY;
+
+    if (!apiKey || apiKey === "undefined") {
+        const errorMsg = "⚠️ API Key is missing. Please set 'API_KEY' in Netlify Environment Variables.";
+        console.error(errorMsg);
+        setTranscript(errorMsg);
+        throw new Error(errorMsg);
     }
 
-    if (key === "YOUR_API_KEY_HERE") {
-        console.warn("⚠️ API Key is missing. Please replace 'YOUR_API_KEY_HERE' in App.tsx or set process.env.API_KEY");
-    }
-
-    return new GoogleGenAI({ apiKey: key });
+    return new GoogleGenAI({ apiKey });
   };
 
   // --- Audio Output Handling ---
@@ -56,7 +46,6 @@ const App: React.FC = () => {
     if (!audioContextRef.current) return;
     const ctx = audioContextRef.current;
 
-    // Decode
     const binaryString = atob(base64Audio);
     const len = binaryString.length;
     const bytes = new Uint8Array(len);
@@ -66,9 +55,7 @@ const App: React.FC = () => {
     
     const audioBuffer = await decodeAudioData(bytes, ctx);
 
-    // Schedule
     const now = ctx.currentTime;
-    // Ensure we don't schedule in the past
     const startTime = Math.max(nextStartTimeRef.current, now);
     
     const source = ctx.createBufferSource();
@@ -78,10 +65,8 @@ const App: React.FC = () => {
 
     nextStartTimeRef.current = startTime + audioBuffer.duration;
 
-    // Visualizer State
     setModelSpeaking(true);
     source.onended = () => {
-        // Simple check: if current time > known end time, we stopped speaking
         if (ctx.currentTime >= nextStartTimeRef.current - 0.1) {
             setModelSpeaking(false);
         }
@@ -94,7 +79,6 @@ const App: React.FC = () => {
     setTranscript("Connecting to MARK...");
 
     try {
-      // 1. Initialize Audio Contexts immediately to capture User Gesture
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       }
@@ -104,12 +88,10 @@ const App: React.FC = () => {
 
       inputContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       
-      // 2. Get Mic Stream
       const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
       const ai = getAIClient();
       
-      // 3. Connect to Live API
       const sessionPromise = ai.live.connect({
         model: MODEL_NAME,
         config: {
@@ -126,7 +108,6 @@ const App: React.FC = () => {
             setConnectionState(ConnectionState.CONNECTED);
             setTranscript("MARK is listening...");
             
-            // Start Audio Stream Processing
             const source = inputContextRef.current!.createMediaStreamSource(audioStream);
             const processor = inputContextRef.current!.createScriptProcessor(4096, 1, 1);
             
@@ -135,7 +116,6 @@ const App: React.FC = () => {
 
                 const inputData = e.inputBuffer.getChannelData(0);
                 
-                // Simple VAD
                 let sum = 0;
                 for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
                 const rms = Math.sqrt(sum / inputData.length);
@@ -152,21 +132,18 @@ const App: React.FC = () => {
             processor.connect(inputContextRef.current!.destination);
           },
           onmessage: (msg: LiveServerMessage) => {
-            // Audio Output
             const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (audioData) {
                 playAudioChunk(audioData);
             }
 
-            // User Transcription
             const inputTrans = msg.serverContent?.inputTranscription?.text;
             if (inputTrans) {
-                clearTimeout(transcriptionTimeoutRef.current!);
+                clearTimeout(transcriptionTimeoutRef.current);
                 setTranscript(`You: ${inputTrans}`);
                 transcriptionTimeoutRef.current = setTimeout(() => setTranscript(""), 5000);
             }
 
-            // Interruption
             if (msg.serverContent?.interrupted) {
                 console.log("Model Interrupted");
                 nextStartTimeRef.current = 0;
@@ -175,7 +152,6 @@ const App: React.FC = () => {
           },
           onclose: () => {
             console.log("Session Closed");
-            // If closed remotely, we handle it as a disconnect
             disconnect();
           },
           onerror: (err) => {
@@ -191,53 +167,44 @@ const App: React.FC = () => {
     } catch (e) {
       console.error(e);
       setConnectionState(ConnectionState.ERROR);
-      setTranscript("Failed to initialize. Check permissions.");
+      setTranscript("Failed to initialize. Check permissions or API Key.");
     }
   };
 
   const disconnect = useCallback(() => {
-    // 1. Close Audio Contexts
     if (inputContextRef.current) {
       inputContextRef.current.close();
       inputContextRef.current = null;
     }
     if (audioContextRef.current) {
-      // We don't necessarily close the output context to allow re-use, 
-      // but suspending it stops processing.
       audioContextRef.current.suspend(); 
     }
     
-    // 2. Stop Media Streams (Mic & Camera)
     if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
     }
     
-    // 3. Clear Intervals
     if (frameIntervalRef.current) {
       clearInterval(frameIntervalRef.current);
       frameIntervalRef.current = null;
     }
 
-    // 4. Reset UI State
     setConnectionState(ConnectionState.DISCONNECTED);
     setTranscript("");
     setIsCameraActive(false);
     setModelSpeaking(false);
     setUserSpeaking(false);
-    
-    // 5. Clean up session reference
     sessionPromiseRef.current = null;
   }, []);
 
-  // --- Video Handling ---
   const startCamera = async () => {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
             video: { 
-                width: { ideal: 1920 }, // Full HD for better object detection
+                width: { ideal: 1920 },
                 height: { ideal: 1080 },
-                facingMode: "environment" // Use back camera if available (better for objects)
+                facingMode: "environment"
             } 
         });
         if (videoRef.current) {
@@ -246,8 +213,6 @@ const App: React.FC = () => {
         }
         streamRef.current = stream;
         setIsCameraActive(true);
-
-        // Send frames every 600ms (balanced for performance/latency)
         frameIntervalRef.current = window.setInterval(sendVideoFrame, 600); 
     } catch (e) {
         console.error("Camera access denied", e);
@@ -276,7 +241,6 @@ const App: React.FC = () => {
     canvasRef.current.height = videoRef.current.videoHeight;
     ctx.drawImage(videoRef.current, 0, 0);
 
-    // High quality JPEG (0.8) for detailed object detection
     canvasRef.current.toBlob(async (blob) => {
         if (blob) {
             const base64 = await blobToBase64(blob);
@@ -292,11 +256,9 @@ const App: React.FC = () => {
     }, 'image/jpeg', 0.8);
   };
 
-  // Toggle Camera
   useEffect(() => {
     if (connectionState === ConnectionState.CONNECTED) {
         if (isCameraActive) {
-            // If we don't have a stream yet, start it
             if (!streamRef.current || streamRef.current.getVideoTracks().length === 0) {
                  startCamera();
             }
@@ -310,13 +272,11 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-black text-white flex flex-col items-center justify-between p-4 relative font-sans">
-      {/* Background Elements */}
       <div className="absolute top-0 left-0 w-full h-full overflow-hidden z-0 pointer-events-none">
         <div className={`absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-blue-900 rounded-full blur-[128px] opacity-20 transition-all duration-1000 ${modelSpeaking ? 'scale-125 opacity-40' : 'scale-100'}`}></div>
         <div className={`absolute top-1/4 right-1/4 w-64 h-64 bg-purple-900 rounded-full blur-[96px] opacity-20 transition-all duration-1000 ${userSpeaking ? 'scale-125 opacity-40' : 'scale-100'}`}></div>
       </div>
 
-      {/* Header */}
       <header className="z-10 w-full flex justify-between items-center p-2">
         <div className="flex items-center gap-2">
             <Zap className="w-6 h-6 text-yellow-400 fill-current" />
@@ -325,14 +285,10 @@ const App: React.FC = () => {
         <div className="text-xs text-gray-400">Created by Ankit Raj</div>
       </header>
 
-      {/* Main Content Area */}
       <main className="z-10 flex-1 flex flex-col items-center justify-center w-full max-w-md gap-8">
-        
-        {/* Hidden Video Elements */}
         <video ref={videoRef} className="hidden" muted playsInline />
         <canvas ref={canvasRef} className="hidden" />
 
-        {/* Camera Preview */}
         {isCameraActive && (
             <div className="relative w-72 h-48 rounded-2xl overflow-hidden border border-gray-700 shadow-2xl mb-4 transition-all duration-500 ease-out transform translate-y-0 opacity-100">
                  <video 
@@ -348,12 +304,10 @@ const App: React.FC = () => {
                     <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
                     <span className="text-[10px] uppercase font-bold text-white">Live Vision</span>
                  </div>
-                 {/* Scanning Effect Overlay */}
                  <div className="absolute top-0 left-0 w-full h-1 bg-blue-400/50 shadow-[0_0_15px_rgba(96,165,250,0.8)] animate-[scan_2s_linear_infinite]"></div>
             </div>
         )}
 
-        {/* Status Text */}
         <div className="text-center space-y-4 h-32 flex flex-col justify-center">
             {connectionState === ConnectionState.CONNECTED ? (
                 <>
@@ -376,16 +330,13 @@ const App: React.FC = () => {
             )}
         </div>
 
-        {/* Visualizer */}
         <Visualizer 
             isActive={connectionState === ConnectionState.CONNECTED}
             isSpeaking={modelSpeaking}
             isListening={userSpeaking}
         />
-
       </main>
 
-      {/* Controls */}
       <footer className="z-10 w-full max-w-md pb-8 px-6">
         {connectionState === ConnectionState.DISCONNECTED || connectionState === ConnectionState.ERROR ? (
             <button 
@@ -397,7 +348,6 @@ const App: React.FC = () => {
             </button>
         ) : (
             <div className="flex flex-col items-center gap-6 w-full animate-in fade-in slide-in-from-bottom-8 duration-500">
-                {/* Connection State: CONNECTING */}
                 {connectionState === ConnectionState.CONNECTING ? (
                     <div className="flex items-center gap-2 text-blue-400">
                         <Loader2 className="w-6 h-6 animate-spin" />
@@ -405,9 +355,7 @@ const App: React.FC = () => {
                     </div>
                 ) : (
                     <>
-                        {/* Primary Controls Row */}
                         <div className="flex items-center justify-center gap-8">
-                            {/* Camera Toggle */}
                             <button 
                                 onClick={() => setIsCameraActive(!isCameraActive)}
                                 className={`p-5 rounded-full transition-all duration-300 border ${isCameraActive ? 'bg-white text-black border-white shadow-[0_0_20px_rgba(255,255,255,0.4)]' : 'bg-gray-900/50 text-white border-gray-700 hover:bg-gray-800'}`}
@@ -415,7 +363,6 @@ const App: React.FC = () => {
                                 {isCameraActive ? <Video className="w-6 h-6" /> : <Camera className="w-6 h-6" />}
                             </button>
 
-                            {/* Mic/Mute Toggle */}
                             <button 
                                 onClick={() => setIsMicActive(!isMicActive)}
                                 className={`p-7 rounded-full shadow-2xl transition-all duration-300 border transform ${isMicActive ? 'bg-blue-600 text-white border-blue-400 shadow-[0_0_25px_rgba(37,99,235,0.5)] scale-110' : 'bg-red-500/80 text-white border-red-500 hover:bg-red-500'}`}
@@ -424,7 +371,6 @@ const App: React.FC = () => {
                             </button>
                         </div>
 
-                        {/* End Conversation Button */}
                         <button 
                             onClick={disconnect}
                             className="group w-full max-w-[200px] bg-red-950/30 backdrop-blur-sm border border-red-900/50 text-red-400 font-semibold py-3 px-6 rounded-2xl hover:bg-red-900/50 hover:text-red-200 transition-all flex items-center justify-center gap-2 mt-2"
@@ -438,7 +384,6 @@ const App: React.FC = () => {
         )}
       </footer>
       
-      {/* CSS for Scan Animation */}
       <style>{`
         @keyframes scan {
             0% { top: 0%; opacity: 0; }
